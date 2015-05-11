@@ -23,10 +23,6 @@ import progressbar as pb
 
 # Base URL for the path to all game files
 BASE_URL = 'http://gd2.mlb.com/components/'
-GAMES_URL = 'game/mlb/'
-
-# Chunk size when downloading a file
-CHUNK_SIZE = 16 * 1024
 
 class NotSupportedError(Exception):
     """Exception for a build not being supported"""
@@ -50,6 +46,9 @@ class TimeoutError(Exception):
         self.message = 'The download exceeded the allocated timeout'
         Exception.__init__(self, self.message)
 
+# Chunk size when downloading a file
+CHUNK_SIZE = 16 * 1024
+
 # http://gd2.mlb.com/components/game/mlb/year_2015/month_05/day_07/gid_2015_05_07_balmlb_nyamlb_1/inning/inning_all.xml
 
 class Scraper(object):
@@ -63,90 +62,46 @@ class Scraper(object):
         self.retry_attempts = retry_attempts
         self.retry_delay = retry_delay
         self.timeout = timeout
-        self.base_url = base_url
-        if not base_url:
-            self.base_url = BASE_URL
-        self.base_url = urljoin(self.base_url, GAMES_URL)
-        self.base_url = urljoin(self.base_url, self.date_url)
         self.refresh = kwargs['refresh']
         self.logger = logging.getLogger('scraper')
         ch = logging.StreamHandler()
         ch.setLevel(logging.INFO)
         self.logger.addHandler(ch)
         self.logger.setLevel(logging.INFO)
+        self.dest = kwargs['dest']
+        if self.dest:
+            self.dest = os.path.abspath(self.dest)
+            if not os.path.exists(self.dest):
+                os.mkdir(self.dest)
+        else:
+            self.dest = os.path.abspath(os.path.curdir)
 
-    def games(self):
-        attempt = 0
-        parser = None
-        while parser is None:
-            attempt += 1
-            try:
-                # Retrieve all entries from the remote virtual folder
-                parser = DirectoryParser(self.base_url,
-                                         timeout=self.timeout)
-                if not parser.entries:
-                    raise NotFoundError('No entries found', self.base_url)
-
-            except (NotFoundError, requests.exceptions.RequestException), e:
-                if self.retry_attempts > 0:
-                    # Log only if multiple attempts are requested
-                    #self.logger.warning("Build not found: '%s'" % e.message)
-                    #self.logger.info('Will retry in %s seconds...' %
-                    #                 (self.retry_delay))
-                    time.sleep(self.retry_delay)
-                    #self.logger.info("Retrying... (attempt %s)" % attempt)
-
-                if attempt >= self.retry_attempts:
-                    if hasattr(e, 'response') and \
-                            e.response.status_code == 404:
-                        message = "Specified url has not been found"
-                        raise NotFoundError(message, e.response.url)
-                    else:
-                        raise
-
-        game_url_pattern = re.compile('gid_([\d]+)_([\d]+)_([\d]+)_([a-z]{3})mlb_([a-z]{3})mlb_(\d)/')
-
-        self.games = []
-        for entry in parser.entries:
-            match = game_url_pattern.match(entry)
-            if match:
-                game = {}
-                game['directory'] = match.group(0)
-                game['date'] = self.date
-                game['visitor'] = match.group(4)
-                game['home'] = match.group(5)
-                game['game_no'] = match.group(6)
-                self.games.append(game)
-
-        return self.games
-
-    def game_file(self, game_directory):
+    def files(self):
+        """Override to provide the list of files your scraper provides."""
         pass
 
     def download(self):
         """Download the specified file"""
 
-        for game in self.games:
-
-            game['url'] = urljoin(self.base_url, game['directory'])
-            game['url'] = urljoin(game['url'], 'inning/inning_all.xml')
-            game['file'] = os.path.split(game['directory'])[0] + '.xml'
+        for file in self.files:
 
             attempt = 0
 
+            target = os.path.join(self.dest, file['file'])
+
             # Don't re-download the file unless refreshed
-            if os.path.isfile(os.path.abspath(game['file'])):
+            if os.path.isfile(target):
                 if self.refresh:
-                    self.logger.info("Redownloading: %s" % game['file'])
+                    self.logger.info("Redownloading: %s" % file['file'])
                 else:
-                    self.logger.info("File has already been downloaded: %s" % game['file'])
+                    self.logger.info("File has already been downloaded: %s" % file['file'])
                     continue
 
             self.logger.info('Downloading from: %s' %
-                             (urllib.unquote(game['url'])))
-            self.logger.info('Saving as: %s' % game['file'])
+                             (urllib.unquote(file['url'])))
+            self.logger.info('Saving as: %s' % file['file'])
 
-            tmp_file = game['file'] + ".part"
+            tmp_file = target + ".part"
 
             while True:
                 attempt += 1
@@ -154,7 +109,7 @@ class Scraper(object):
                     start_time = datetime.now()
 
                     # Enable streaming mode so we can download content in chunks
-                    r = requests.get(game['url'], stream=True)
+                    r = requests.get(file['url'], stream=True)
                     r.raise_for_status()
 
                     content_length = r.headers.get('Content-length')
@@ -202,22 +157,87 @@ class Scraper(object):
                         raise
                     time.sleep(self.retry_delay)
 
-            os.rename(tmp_file, game['file'])
+            os.rename(tmp_file, target)
+
+game_url_pattern = re.compile('gid_([\d]+)_([\d]+)_([\d]+)_([a-z]{3})mlb_([a-z]{3})mlb_(\d)/')
+GAMES_URL = 'game/mlb/'
+
 
 class GameScraper(Scraper):
     """Class to download games from a given date from MLB Game Day"""
 
-    def __init__(self, date=None, *args, **kwargs):
+    def __init__(self, date=None, base_url=None, *args, **kwargs):
 
         self.date = date
-        if not self.date:
-            self.date = datetime.today() - timedelta(days=1)
-        # A date (without time) has been specified. Use yesterday's games since today's are not finished yet.
+
         try:
+            if self.date:
+                self.date = datetime.strptime(self.date, '%Y-%m-%d')
+            else:
+                # A date (without time) has been specified. Use yesterday's games since today's are not finished yet.
+                self.date = datetime.today() - timedelta(days=1)
             self.date_url = 'year_%d/month_%02d/day_%02d/' % (self.date.year, self.date.month, self.date.day)
         except:
             raise ValueError('%s is not a valid date' % self.date)
-        Scraper.__init__(self, *args, **kwargs)
+
+        self.base_url = base_url
+        if not base_url:
+            self.base_url = BASE_URL
+        self.base_url = urljoin(self.base_url, GAMES_URL)
+        self.base_url = urljoin(self.base_url, self.date_url)
+
+        Scraper.__init__(self, base_url=self.base_url, *args, **kwargs)
+
+
+    def files(self):
+        attempt = 0
+        parser = None
+        while parser is None:
+            attempt += 1
+            try:
+                # Retrieve all entries from the remote virtual folder
+                parser = DirectoryParser(self.base_url,
+                                         timeout=self.timeout)
+                if not parser.entries:
+                    raise NotFoundError('No entries found', self.base_url)
+
+            except (NotFoundError, requests.exceptions.RequestException), e:
+                if self.retry_attempts > 0:
+                    # Log only if multiple attempts are requested
+                    #self.logger.warning("Build not found: '%s'" % e.message)
+                    #self.logger.info('Will retry in %s seconds...' %
+                    #                 (self.retry_delay))
+                    time.sleep(self.retry_delay)
+                    #self.logger.info("Retrying... (attempt %s)" % attempt)
+
+                if attempt >= self.retry_attempts:
+                    if hasattr(e, 'response') and \
+                            e.response.status_code == 404:
+                        message = "Specified url has not been found"
+                        raise NotFoundError(message, e.response.url)
+                    else:
+                        raise
+
+
+        self.files = []
+        for entry in parser.entries:
+            match = game_url_pattern.match(entry)
+            if match:
+                file = {}
+                file['directory'] = match.group(0)
+                file['date'] = self.date
+                file['visitor'] = match.group(4)
+                file['home'] = match.group(5)
+                file['game_no'] = match.group(6)
+                file['url'] = urljoin(self.base_url, file['directory'])
+                file['url'] = urljoin(self.base_url, file['directory'])
+                file['url'] = urljoin(file['url'], 'inning/inning_all.xml')
+                file['file'] = os.path.split(file['directory'])[0] + '.xml'
+
+                self.files.append(file)
+
+        return self.files
+
 
 def cli():
     """Main function for the downloader"""
@@ -257,12 +277,17 @@ def cli():
     parser.add_option('--date',
                      dest='date',
                      metavar='DATE',
-                     help='Date of the games, default: yesterday')
+                     help='Date of the games (YYYY-MM-DD), default: yesterday')
     parser.add_option('--refresh',
                       dest='refresh',
                       default=False,
                       metavar='REFRESH',
                       help='Download files even if they already exist (default: %default)')
+    parser.add_option('--dest',
+                      dest='dest',
+                      default='',
+                      metavar='DEST',
+                      help='Destination directory for downloaded files. Current directory if none specified')
 
     (options, args) = parser.parse_args()
 
@@ -273,14 +298,15 @@ def cli():
                         'timeout': options.timeout,
                         'log_level': options.log_level,
                         'date': options.date,
-                        'refresh': options.refresh}
+                        'refresh': options.refresh,
+                        'dest': options.dest}
 
     kwargs = scraper_keywords.copy()
 
     scraper = GameScraper(**kwargs)
 
     try:
-        scraper.games()
+        scraper.files()
         scraper.download()
     except KeyboardInterrupt:
         print "\nDownload interrupted by the user"
