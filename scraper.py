@@ -21,6 +21,8 @@ from urlparse import urljoin
 
 import progressbar as pb
 
+from gameday_file import GameDayGame, TimeoutError
+
 # Base URL for the path to all game files
 BASE_URL = 'http://gd2.mlb.com/components/'
 
@@ -39,15 +41,6 @@ class NotImplementedError(Exception):
     """Exception for a feature which is not implemented yet"""
     def __init__(self, message):
         Exception.__init__(self, message)
-
-class TimeoutError(Exception):
-    """Exception for a download exceeding the allocated timeout"""
-    def __init__(self):
-        self.message = 'The download exceeded the allocated timeout'
-        Exception.__init__(self, self.message)
-
-# Chunk size when downloading a file
-CHUNK_SIZE = 16 * 1024
 
 # http://gd2.mlb.com/components/game/mlb/year_2015/month_05/day_07/gid_2015_05_07_balmlb_nyamlb_1/inning/inning_all.xml
 
@@ -77,87 +70,47 @@ class Scraper(object):
             self.dest = os.path.abspath(os.path.curdir)
 
     def files(self):
-        """Override to provide the list of files your scraper provides."""
+        attempt = 0
+        parser = None
+        while parser is None:
+            attempt += 1
+            try:
+                # Retrieve all entries from the remote virtual folder
+                parser = DirectoryParser(self.base_url,
+                                         timeout=self.timeout)
+                if not parser.entries:
+                    raise NotFoundError('No entries found', self.base_url)
+
+            except (NotFoundError, requests.exceptions.RequestException), e:
+                if self.retry_attempts > 0:
+                    # Log only if multiple attempts are requested
+                    #self.logger.warning("Build not found: '%s'" % e.message)
+                    #self.logger.info('Will retry in %s seconds...' %
+                    #                 (self.retry_delay))
+                    time.sleep(self.retry_delay)
+                    #self.logger.info("Retrying... (attempt %s)" % attempt)
+
+                if attempt >= self.retry_attempts:
+                    if hasattr(e, 'response') and \
+                            e.response.status_code == 404:
+                        message = "Specified url has not been found"
+                        raise NotFoundError(message, e.response.url)
+                    else:
+                        raise
+
+        self.files = []
+
+        self.parse_entries(parser.entries)
+
+    def parse_entries(self):
+        """Override for specific types of files that we are looking for"""
         pass
 
     def download(self):
         """Download the specified file"""
 
         for file in self.files:
-
-            attempt = 0
-
-            target = os.path.join(self.dest, file['file'])
-
-            # Don't re-download the file unless refreshed
-            if os.path.isfile(target):
-                if self.refresh:
-                    self.logger.info("Redownloading: %s" % file['file'])
-                else:
-                    self.logger.info("File has already been downloaded: %s" % file['file'])
-                    continue
-
-            self.logger.info('Downloading from: %s' %
-                             (urllib.unquote(file['url'])))
-            self.logger.info('Saving as: %s' % file['file'])
-
-            tmp_file = target + ".part"
-
-            while True:
-                attempt += 1
-                try:
-                    start_time = datetime.now()
-
-                    # Enable streaming mode so we can download content in chunks
-                    r = requests.get(file['url'], stream=True)
-                    r.raise_for_status()
-
-                    content_length = r.headers.get('Content-length')
-                    # ValueError: Value out of range if only total_size given
-                    if content_length:
-                        total_size = int(content_length.strip())
-                        max_value = ((total_size / CHUNK_SIZE) + 1) * CHUNK_SIZE
-
-                    bytes_downloaded = 0
-
-                    log_level = self.logger.getEffectiveLevel()
-                    if log_level <= logging.INFO and content_length:
-                        widgets = [pb.Percentage(), ' ', pb.Bar(), ' ', pb.ETA(),
-                                   ' ', pb.FileTransferSpeed()]
-                        pbar = pb.ProgressBar(widgets=widgets,
-                                              maxval=max_value).start()
-
-                    with open(tmp_file, 'wb') as f:
-                        for chunk in iter(lambda: r.raw.read(CHUNK_SIZE), ''):
-                            f.write(chunk)
-                            bytes_downloaded += CHUNK_SIZE
-
-                            if log_level <= logging.INFO and content_length:
-                                pbar.update(bytes_downloaded)
-
-                            t1 = timedelta.total_seconds(datetime.now() - start_time)
-                            if self.timeout and \
-                                    t1 >= self.timeout:
-                                raise TimeoutError
-
-                    if log_level <= logging.INFO and content_length:
-                        pbar.finish()
-                    break
-                except (requests.exceptions.RequestException, TimeoutError), e:
-                    if tmp_file and os.path.isfile(tmp_file):
-                        os.remove(tmp_file)
-                    if self.retry_attempts > 0:
-                        # Log only if multiple attempts are requested
-                        self.logger.warning('Download failed: "%s"' % str(e))
-                        self.logger.info('Will retry in %s seconds...' %
-                                         (self.retry_delay))
-                        time.sleep(self.retry_delay)
-                        self.logger.info("Retrying... (attempt %s)" % attempt)
-                    if attempt >= self.retry_attempts:
-                        raise
-                    time.sleep(self.retry_delay)
-
-            os.rename(tmp_file, target)
+            file.download(dest=self.dest, refresh=self.refresh, timeout=self.timeout)
 
 game_url_pattern = re.compile('gid_([\d]+)_([\d]+)_([\d]+)_([a-z]{3})mlb_([a-z]{3})mlb_(\d)/')
 GAMES_URL = 'game/mlb/'
@@ -189,55 +142,20 @@ class GameScraper(Scraper):
         Scraper.__init__(self, base_url=self.base_url, *args, **kwargs)
 
 
-    def files(self):
-        attempt = 0
-        parser = None
-        while parser is None:
-            attempt += 1
-            try:
-                # Retrieve all entries from the remote virtual folder
-                parser = DirectoryParser(self.base_url,
-                                         timeout=self.timeout)
-                if not parser.entries:
-                    raise NotFoundError('No entries found', self.base_url)
-
-            except (NotFoundError, requests.exceptions.RequestException), e:
-                if self.retry_attempts > 0:
-                    # Log only if multiple attempts are requested
-                    #self.logger.warning("Build not found: '%s'" % e.message)
-                    #self.logger.info('Will retry in %s seconds...' %
-                    #                 (self.retry_delay))
-                    time.sleep(self.retry_delay)
-                    #self.logger.info("Retrying... (attempt %s)" % attempt)
-
-                if attempt >= self.retry_attempts:
-                    if hasattr(e, 'response') and \
-                            e.response.status_code == 404:
-                        message = "Specified url has not been found"
-                        raise NotFoundError(message, e.response.url)
-                    else:
-                        raise
-
-
-        self.files = []
-        for entry in parser.entries:
+    def parse_entries(self, entries):
+        for entry in entries:
             match = game_url_pattern.match(entry)
             if match:
-                file = {}
-                file['directory'] = match.group(0)
-                file['date'] = self.date
-                file['visitor'] = match.group(4)
-                file['home'] = match.group(5)
-                file['game_no'] = match.group(6)
-                file['url'] = urljoin(self.base_url, file['directory'])
-                file['url'] = urljoin(self.base_url, file['directory'])
-                file['url'] = urljoin(file['url'], 'inning/inning_all.xml')
-                file['file'] = os.path.split(file['directory'])[0] + '.xml'
-
+                directory = match.group(0)
+                visitor = match.group(4)
+                home = match.group(5)
+                game_no = match.group(6)
+                url = urljoin(self.base_url, directory)
+                url = urljoin(url, 'inning/inning_all.xml')
+                file_name = os.path.split(directory)[0] + '.xml'
+                file = GameDayGame(directory=directory, date=self.date, visitor=visitor, home=home,
+                                   game_no=game_no, url=url, file=file_name, logger=self.logger)
                 self.files.append(file)
-
-        return self.files
-
 
 def cli():
     """Main function for the downloader"""
