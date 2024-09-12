@@ -108,6 +108,10 @@ class GameDayFile(object):
     def populate(self):
         pass
 
+    def process(self):
+        self.parse()
+        self.populate()
+
 class GameDayGame(GameDayFile):
 
     def __init__(self, directory=None, url=None, file=None, date=None, visitor=None, home=None, game_no=None, logger=None):
@@ -116,4 +120,10 @@ class GameDayGame(GameDayFile):
         self.home = home
         self.game_no = game_no
         GameDayFile.__init__(self, url=url, file=file, directory=directory, logger=logger)
+
+    def parse(self):
+        pass
+
+    def populate(self):
+        pass
 

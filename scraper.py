@@ -107,10 +107,16 @@ class Scraper(object):
         pass
 
     def download(self):
-        """Download the specified file"""
+        """Download the specified files"""
 
         for file in self.files:
             file.download(dest=self.dest, refresh=self.refresh, timeout=self.timeout)
+
+    def process(self):
+        """Process the files. This usually means populating the database."""
+
+        for file in self.files:
+            file.process()
 
 game_url_pattern = re.compile('gid_([\d]+)_([\d]+)_([\d]+)_([a-z]{3})mlb_([a-z]{3})mlb_(\d)/')
 GAMES_URL = 'game/mlb/'
